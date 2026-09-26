@@ -169,5 +169,30 @@ tr.row-fail td { font-weight: 600; }
 .reject { color: var(--fail); }
 .reject-msg { font-size: 14.5px; background: var(--fail-bg); border-radius: 6px; padding: 10px 14px; margin: 0 0 8px; }
 
+/* 薄弱管段复核 */
+.review-scenario {
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; margin-top: 14px; background: #fcfdfe;
+}
+.review-scenario h3 { margin-bottom: 10px; }
+.grade-block { margin-top: 12px; }
+.grade-block h4 { font-size: 13.5px; margin: 0 0 8px; }
+.grade-all > h4 { color: var(--fail); }
+.grade-some > h4 { color: var(--warn); }
+.grade-never > summary {
+  color: var(--muted); cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0;
+}
+.grade-never .table-scroll { margin-top: 8px; }
+.grade-empty { margin: 0; }
+.grade-table td:last-child { white-space: normal; }
+.tag {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; margin-right: 4px;
+}
+.tag.all { background: var(--fail-bg); color: var(--fail); }
+.tag.some { background: var(--warn-bg); color: var(--warn); }
+.tag.accidental { background: #efe7f7; color: #6b3fa0; }
+.review-fail-sub { margin-top: 18px; }
+
 footer { padding-bottom: 40px; }
 code { background: #eef1f5; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }

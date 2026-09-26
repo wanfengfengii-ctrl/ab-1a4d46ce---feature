@@ -74,6 +74,7 @@
 
     <div class="submit-row">
       <button type="button" class="btn primary" id="btn-audit">提交审计</button>
+      <button type="button" class="btn" id="btn-review" title="由服务端从完整草稿重新执行审计，并对达标情形给出全部最小割的管段归属分级">薄弱管段复核</button>
       <span id="draft-hint" class="tip"></span>
     </div>
   </section>
@@ -181,10 +182,72 @@
     </div>
   </section>
 
+  <!-- ============ 薄弱管段复核结论 ============ -->
+  <section class="card hidden" id="review-card">
+    <div class="stale-banner hidden" id="review-stale-banner">
+      ⚠ 草稿在上次复核之后已被修改，以下为<strong>旧复核结论</strong>，不能作为当前草稿的检修依据；请重新发起复核。
+    </div>
+
+    <div class="card-head">
+      <h2>薄弱管段复核结论（全部最小割归属）</h2>
+      <button type="button" class="btn small" id="btn-review-rerun">重新复核</button>
+    </div>
+    <p class="tip">复核由服务端从完整草稿<strong>重新执行检修审计</strong>；对每个达标情形，基于残余网络判定每条管段在<strong>全部</strong>容量等于该情形最大可导排量的源侧最小割中的归属，而非只凭一次最大流运行恰好返回的割集。裕量＝最小割容量 − 事故必须持续排出量。</p>
+
+    <!-- 复核未放行：保留既有首条失败证据，不生成薄弱分级 -->
+    <div id="review-fail-panel" class="hidden">
+      <div class="verdict fail">
+        <span class="badge fail">✘ 审计未通过，未生成薄弱分级</span>
+        <p>按管段录入顺序，既有首条失败证据为
+          <strong id="review-fail-edge"></strong>，该情形最大可导排量
+          <strong id="review-fail-flow"></strong> 低于事故要求 <strong id="review-fail-required"></strong>。</p>
+      </div>
+
+      <div class="evidence">
+        <h3>既有首条失败证据（可复核的最小割）</h3>
+        <div class="cut-grid">
+          <div>
+            <h3>源侧割集节点（含泄压源）</h3>
+            <div id="review-cut-source-side" class="chips"></div>
+          </div>
+          <div>
+            <h3>焚烧端侧节点（含安全焚烧端）</h3>
+            <div id="review-cut-sink-side" class="chips"></div>
+          </div>
+        </div>
+        <h3>割集管段（源侧 → 焚烧端侧）</h3>
+        <div class="table-scroll">
+          <table class="cut-table">
+            <thead><tr><th>#</th><th>管段编号</th><th>源侧节点</th><th>方向</th><th>焚烧端侧节点</th><th>容量</th></tr></thead>
+            <tbody id="review-cut-edges-body"></tbody>
+            <tfoot><tr><td colspan="5" class="right">割集容量（＝该情形最大可导排量）</td><td id="review-cut-capacity" class="strong"></td></tr></tfoot>
+          </table>
+        </div>
+      </div>
+
+      <h3 class="review-fail-sub">各情形最大可导排量（仅审计数值，未生成薄弱分级）</h3>
+      <div class="table-scroll">
+        <table class="scenario-table">
+          <thead><tr><th>情形</th><th>最大可导排量</th><th>事故要求</th><th>判定</th></tr></thead>
+          <tbody id="review-fail-scenarios-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 复核通过：逐情形薄弱分级 -->
+    <div id="review-pass-panel" class="hidden">
+      <div class="verdict pass">
+        <span class="badge pass">✔ 各情形均达标，以下为逐情形薄弱分级</span>
+        <p>“全部最小割均跨越”的管段在任何同容量瓶颈中都不可绕开；“仅部分跨越”的管段只是可替代瓶颈——存在不经过它的同容量最小割。</p>
+      </div>
+      <div id="review-scenarios"></div>
+    </div>
+  </section>
+
 </main>
 
 <footer class="wrap">
-  <p class="tip">结论来自服务端业务 API <code>POST /api/audit</code>（Dinic 最大流 + 残余网络最小割），前端不做流量结论计算。</p>
+  <p class="tip">结论来自服务端业务 API <code>POST /api/audit</code> 与 <code>POST /api/review</code>（Dinic 最大流 + 残余网络最小割归属判定），前端不做任何形式的流量结论计算。</p>
 </footer>
 
 <script src="/static/app.js"></script>

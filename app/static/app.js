@@ -12,7 +12,8 @@
   const state = {
     nodes: [],          // 汇合节点名称（不含源/汇）
     edges: [],          // {id, from, to, capacity, maintainable}
-    lastAuditSignature: null,  // 上次成功提交时草稿的签名
+    lastAuditSignature: null,   // 上次成功提交审计时草稿的签名
+    lastReviewSignature: null,  // 上次成功提交复核时草稿的签名
   };
 
   /* ---------------- 示例数据 ---------------- */
@@ -174,18 +175,26 @@
   }
 
   function markDirty() {
-    if (state.lastAuditSignature === null) return;
-    const stale = signature() !== state.lastAuditSignature;
-    $("stale-banner").classList.toggle("hidden", !stale);
-    $("draft-hint").textContent = stale
-      ? "草稿已修改，结论区显示的是旧结论，请重新提交审计。"
-      : "";
+    if (state.lastAuditSignature !== null) {
+      const stale = signature() !== state.lastAuditSignature;
+      $("stale-banner").classList.toggle("hidden", !stale);
+      $("draft-hint").textContent = stale
+        ? "草稿已修改，结论区显示的是旧结论，请重新提交审计。"
+        : "";
+    }
+    // 草稿任意改动后，旧复核结果立即标为过期，不能作为新草稿的检修依据
+    if (state.lastReviewSignature !== null) {
+      const stale = signature() !== state.lastReviewSignature;
+      $("review-stale-banner").classList.toggle("hidden", !stale);
+    }
   }
 
   function clearResult() {
     $("result-card").classList.add("hidden");
     $("reject-card").classList.add("hidden");
+    $("review-card").classList.add("hidden");
     $("stale-banner").classList.add("hidden");
+    $("review-stale-banner").classList.add("hidden");
     $("draft-hint").textContent = "";
   }
 
@@ -346,6 +355,156 @@
     }
   }
 
+  /* ---------------- 薄弱管段复核（真实业务 API） ---------------- */
+
+  function scenarioTitle(sc) {
+    if (sc.stage === "normal") return "正常网络（无管段失效）";
+    const r = sc.removed;
+    const id = r.edge_id ? `（${r.edge_id}）` : "";
+    return `第 ${r.position} 条管段${id} ${r.from} → ${r.to} 临时失效`;
+  }
+
+  function gradedEdgeRow(g, tagText, tagCls) {
+    const id = g.edge_id || "—";
+    const accidental = g.in_returned_cut && g.crosses !== "all"
+      ? '<span class="tag accidental">单次割集偶然包含</span>'
+      : "";
+    const tag = tagText ? `<span class="tag ${tagCls}">${tagText}</span>` : "";
+    return `<tr><td>${g.position}</td><td>${id}</td>` +
+      `<td>${g.from} → ${g.to}</td><td>${fmt(g.capacity)}</td>` +
+      `<td>${tag}${accidental}</td></tr>`;
+  }
+
+  function gradeTable(rows) {
+    return '<div class="table-scroll"><table class="cut-table grade-table">' +
+      "<thead><tr><th>#</th><th>管段编号</th><th>管段</th><th>容量</th><th>标记</th></tr></thead>" +
+      `<tbody>${rows}</tbody></table></div>`;
+  }
+
+  function emptyGradeNote(text) {
+    return `<p class="tip grade-empty">${text}</p>`;
+  }
+
+  function renderReviewScenario(sc, required) {
+    const wrap = document.createElement("div");
+    wrap.className = "review-scenario";
+
+    const edges = sc.edges || [];
+    const all = edges.filter((g) => g.crosses === "all");
+    const some = edges.filter((g) => g.crosses === "some");
+    const never = edges.filter((g) => g.crosses === "never");
+
+    const allRows = all.map((g) => gradedEdgeRow(g, "所有同容量瓶颈必经", "all")).join("");
+    const someRows = some.map((g) => gradedEdgeRow(g, "可替代瓶颈", "some")).join("");
+    const neverRows = never.map((g) => gradedEdgeRow(g, "", "")).join("");
+
+    wrap.innerHTML =
+      `<h3>${scenarioTitle(sc)}</h3>` +
+      '<div class="metric-row">' +
+        `<div class="metric"><span class="metric-label">最大可导排量</span><span class="metric-value">${fmt(sc.max_flow)}</span></div>` +
+        `<div class="metric"><span class="metric-label">最小割容量</span><span class="metric-value">${fmt(sc.min_cut_capacity)}</span></div>` +
+        `<div class="metric"><span class="metric-label">事故要求流量</span><span class="metric-value">${fmt(required)}</span></div>` +
+        `<div class="metric"><span class="metric-label">导排裕量</span><span class="metric-value meets-yes">${fmt(sc.margin)}</span></div>` +
+      "</div>" +
+      '<div class="grade-block grade-all">' +
+        `<h4>全部最小割均跨越 —— 不可绕开的管段（${all.length} 条）</h4>` +
+        (all.length ? gradeTable(allRows)
+                    : emptyGradeNote("本情形没有所有同容量瓶颈都不可绕开的管段。")) +
+      "</div>" +
+      '<div class="grade-block grade-some">' +
+        `<h4>仅部分最小割跨越 —— 可替代瓶颈（${some.length} 条）</h4>` +
+        (some.length ? gradeTable(someRows)
+                     : emptyGradeNote("本情形没有仅在部分最小割中出现的管段。")) +
+      "</div>" +
+      '<details class="grade-block grade-never">' +
+        `<summary>从不跨割 —— 非瓶颈管段（${never.length} 条，点击展开）</summary>` +
+        (never.length ? gradeTable(neverRows) : "") +
+      "</details>";
+    return wrap;
+  }
+
+  function renderReview(data) {
+    const card = $("review-card");
+    card.classList.remove("hidden");
+    $("reject-card").classList.add("hidden");
+    $("review-stale-banner").classList.add("hidden");
+    $("draft-hint").textContent = "";
+
+    const passed = !!data.passed;
+    $("review-pass-panel").classList.toggle("hidden", !passed);
+    $("review-fail-panel").classList.toggle("hidden", passed);
+
+    if (passed) {
+      const box = $("review-scenarios");
+      box.innerHTML = "";
+      data.scenarios.forEach((sc) => box.appendChild(renderReviewScenario(sc, data.required_flow)));
+    } else {
+      // 保留既有首条失败证据；不生成任何薄弱分级
+      const f = data.failure;
+      $("review-fail-edge").textContent = f.stage === "normal" ? "（正常网络本身）" : edgeLabel(f);
+      $("review-fail-flow").textContent = fmt(f.max_flow);
+      $("review-fail-required").textContent = fmt(f.required_flow);
+      const cut = f.cut;
+      renderChips($("review-cut-source-side"), cut.source_side_nodes, "src");
+      renderChips($("review-cut-sink-side"), cut.sink_side_nodes, "sink");
+      $("review-cut-edges-body").innerHTML = cutEdgeRows(cut, true);
+      $("review-cut-capacity").textContent = fmt(cut.capacity);
+
+      const body = $("review-fail-scenarios-body");
+      body.innerHTML = "";
+      data.scenarios.forEach((sc) => {
+        const tr = document.createElement("tr");
+        if (sc.stage !== "normal" && f.stage === "single_failure" &&
+            sc.removed && sc.removed.edge_index === f.edge_index) {
+          tr.className = "row-fail";
+        }
+        [scenarioTitle(sc), fmt(sc.max_flow), fmt(data.required_flow)].forEach((c) => {
+          const td = document.createElement("td");
+          td.textContent = c;
+          tr.appendChild(td);
+        });
+        const tdJudge = document.createElement("td");
+        const pill = document.createElement("span");
+        pill.className = "pill " + (sc.meets ? "yes" : "no");
+        pill.textContent = sc.meets ? "达标" : "不达标";
+        tdJudge.appendChild(pill);
+        tr.appendChild(tdJudge);
+        body.appendChild(tr);
+      });
+    }
+
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function submitReview() {
+    const payload = currentPayload();
+    $("btn-review").disabled = true;
+    $("btn-review-rerun").disabled = true;
+    $("draft-hint").textContent = "正在调用服务端复核 API…";
+    try {
+      const resp = await fetch("/api/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        renderRejection(data.error || `复核请求失败（HTTP ${resp.status}）`);
+        state.lastReviewSignature = null;
+        return;
+      }
+      state.lastReviewSignature = signature();
+      renderReview(data);
+    } catch (e) {
+      renderRejection("无法连接复核服务：" + e.message);
+      state.lastReviewSignature = null;
+    } finally {
+      $("btn-review").disabled = false;
+      $("btn-review-rerun").disabled = false;
+      if ($("draft-hint").textContent.startsWith("正在")) $("draft-hint").textContent = "";
+    }
+  }
+
   /* ---------------- 载入 / 清空 ---------------- */
 
   function loadExample(ex) {
@@ -356,6 +515,7 @@
     state.nodes = ex.nodes.slice();
     state.edges = ex.edges.map((e) => ({ ...e }));
     state.lastAuditSignature = null;
+    state.lastReviewSignature = null;
     renderAll();
   }
 
@@ -367,6 +527,7 @@
     state.nodes = [];
     state.edges = [];
     state.lastAuditSignature = null;
+    state.lastReviewSignature = null;
     renderAll();
   }
 
@@ -387,6 +548,8 @@
   });
 
   $("btn-audit").addEventListener("click", submitAudit);
+  $("btn-review").addEventListener("click", submitReview);
+  $("btn-review-rerun").addEventListener("click", submitReview);
   $("btn-example-pass").addEventListener("click", () => loadExample(EXAMPLE_PASS));
   $("btn-example-fail").addEventListener("click", () => loadExample(EXAMPLE_FAIL));
   $("btn-clear").addEventListener("click", clearAll);
