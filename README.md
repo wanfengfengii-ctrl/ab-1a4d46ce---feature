@@ -12,6 +12,14 @@
 返回首条不达标管段，并依据最大流 / 最小割定理给出可复核的
 **源侧割集节点、焚烧端侧节点、割集管段与割集容量**。
 
+审计通过后，安全工程师可对当前管网发起**薄弱管段复核**：服务端从完整
+草稿**重新执行既有审计**，对每个达标情形考察**全部**容量等于该情形
+最大可导排量的源侧最小割（而非单次最大流恰好返回的那一个割集），
+把每条管段分为**全部最小割必经 / 仅部分最小割跨越（可替代瓶颈）/
+从不跨割**，并返回各情形最小割容量与相对事故要求流量的**裕量**。
+若某情形本已不达标，复核保留既有首条失败证据，**不生成薄弱分级**；
+草稿任意改动后，旧复核结果立即标为过期，不能作为新草稿的检修依据。
+
 > 结论以**流量**为准而非路径条数：存在多条路径不代表总排量达标，
 > 共享瓶颈会限制总流量（见 `tests/test_flow.py::test_shared_bottleneck_not_path_count`）。
 
@@ -47,7 +55,9 @@ echo "exit code = $?"
 ```
 
 冒烟覆盖：健康检查、达标网络放行、失效网络返回首条失效管段且
-割集容量 == 最大流、非法节点引用返回 400。
+割集容量 == 最大流、薄弱复核全最小割分级（并联干线无“全部必经”、
+唯一瓶颈归入“全部必经”、失效后闲置管段“从不跨割”）、不达标草稿
+复核不生成分级、非法节点引用返回 400。
 
 ## 本地开发（不使用 Docker）
 
@@ -120,26 +130,98 @@ uvicorn app.main:app --reload  # 开发服务
 {"error": "第 1 条管段终点“X”未在节点中定义", "field": "edges[0].to"}
 ```
 
+### `POST /api/review`
+
+薄弱管段复核。请求体与 `/api/audit` 相同（完整草稿）；服务端**重新执行
+既有审计**，再对每个达标情形做全最小割分级。
+
+全部情形达标时（节选）：
+
+```json
+{
+  "reviewable": true,
+  "required_flow": 95,
+  "failure": null,
+  "scenarios": [
+    {
+      "stage": "normal",
+      "removed": null,
+      "max_flow": 200,
+      "min_cut_capacity": 200,
+      "margin": 105,
+      "meets": true,
+      "min_source_side_nodes": ["泄压源V-101"],
+      "max_source_side_nodes": ["泄压源V-101", "汇合点A", "汇合点B"],
+      "edges": [
+        {"position": 1, "id": "E1", "from": "...", "to": "...", "capacity": 100, "class": "some"}
+      ],
+      "class_counts": {"all": 0, "some": 4, "never": 1}
+    },
+    {
+      "stage": "single_failure",
+      "removed": {"position": 1, "edge_id": "E1", "from": "...", "to": "...", "capacity": 100},
+      "max_flow": 100, "min_cut_capacity": 100, "margin": 5,
+      "edges": [ ... ]
+    }
+  ]
+}
+```
+
+- `scenarios[0]` 恒为正常网络，其后按录入顺序对应每条可检修管段的
+  单点失效情形；`removed` 为本次失效的管段（不参与该情形分级）。
+- `margin` = 该情形最大可导排量 − 事故必须持续排出量；`min_cut_capacity`
+  恒等于 `max_flow`（最大流 / 最小割定理）。
+- 每条管段的 `class`：
+  - `all` **全部最小割必经**：任何同容量瓶颈都绕不开，是真正限制导排余量的管段；
+  - `some` **可替代瓶颈**：仅被部分最小割跨越，单次割集可能偶然包含它；
+  - `never` **从不跨割**：与瓶颈无关。
+- `min_source_side_nodes / max_source_side_nodes` 分别为全部最小割源侧的
+  交集 / 并集，可独立复核分级口径。
+
+分级不枚举指数级最小割，而是在残余网络上用 Picard–Queyranne 结构精确
+判定（源可达集、汇可达集与强连通分量），数学上等价于考察全部最小割；
+正确性由 `tests/test_review.py::test_review_matches_brute_force_all_min_cuts`
+与暴力枚举对照保证。
+
+若某情形本已不达标，复核**不生成薄弱分级**，保留既有首条失败证据：
+
+```json
+{
+  "reviewable": false,
+  "required_flow": 95,
+  "failure": {"stage": "single_failure", "position": 1, "max_flow": 90, "cut": { ... }},
+  "scenarios": null
+}
+```
+
+输入校验与 `/api/audit` 完全一致，无效输入同样返回 `HTTP 400`。
+
 ### `GET /health`
 
 容器健康检查端点，返回 `{"status":"ok",...}`。
 
 ## 前端交互约定
 
-- 页面分三区：**当前输入（草稿）**、**输入被拒绝（400）**、**审计结论**。
+- 页面分三区：**当前输入（草稿）**、**输入被拒绝（400）**、**审计结论**；
+  审计通过后可从结论区发起**薄弱管段复核**（第 ⑤ 区）。
 - 提交审计后通过真实业务 API 渲染正常网络与逐条失效情形的最大可导排量。
 - 通过时显示放行结论；失败时高亮首条失效管段并展示最小割证据。
+- 复核经真实业务 API `POST /api/review` 展示逐情形的**裕量**、
+  **全部最小割必经管段**与**可替代瓶颈**；若复核时审计未通过，
+  只展示既有首条失败证据，不展示任何薄弱分级。
 - 草稿在上次审计之后被任何修改时，旧结论区顶部出现过期警示，
   旧结论不会被当作新草稿的结果；重新审计后才刷新。
+- 草稿在复核之后被任何修改时，旧复核结果立即标为过期，
+  不能作为新草稿的检修依据；须重新审计并再次发起复核。
 
 ## 项目结构
 
 ```
 app/
-  flow.py            # Dinic 最大流 + 残余网络最小割 + 审计编排与业务校验
-  main.py            # FastAPI：/api/audit、/health、静态页面
+  flow.py            # Dinic 最大流 + 残余网络最小割 + 审计编排与业务校验 + 全最小割薄弱分级
+  main.py            # FastAPI：/api/audit、/api/review、/health、静态页面
   static/            # 原生前端（无构建步骤）
-tests/               # pytest：引擎/审计逻辑 + API
+tests/               # pytest：引擎/审计/复核逻辑 + API
 scripts/verify       # 一次性校验：测试 + 构建 + API 冒烟（退出码报告）
 Dockerfile
 docker-compose.yml   # web（常驻，健康检查，端口可配）+ verify（一次性）

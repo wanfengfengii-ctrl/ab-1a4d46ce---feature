@@ -161,6 +161,21 @@ tr.row-fail td { font-weight: 600; }
 .pill.yes { background: var(--pass-bg); color: var(--pass); }
 .pill.no { background: var(--fail-bg); color: var(--fail); }
 
+/* 薄弱管段复核 */
+.review-actions { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.review-scenario {
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; margin-top: 14px; background: #fcfdfe;
+}
+.review-scenario > h3 { margin-bottom: 10px; }
+.review-table .pill { white-space: nowrap; }
+.pill.all { background: var(--fail-bg); color: var(--fail); }
+.pill.some { background: var(--warn-bg); color: var(--warn); }
+.pill.never { background: #eef1f5; color: var(--muted); }
+tr.row-all { background: #fff6f5; }
+tr.row-all td { font-weight: 600; }
+.meets-warn { color: var(--warn); }
+
 .cut-detail { margin-top: 8px; font-size: 13px; }
 .cut-detail summary { cursor: pointer; color: var(--brand); font-weight: 600; padding: 6px 0; }
 .cut-detail .cut-grid { margin-top: 10px; }

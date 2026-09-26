@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .flow import NetworkValidationError, audit_network
+from .flow import NetworkValidationError, audit_network, review_network
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -53,6 +53,35 @@ async def audit(request: Request) -> dict:
         return JSONResponse(status_code=400, content={"error": "请求体必须是 JSON 对象", "field": None})
 
     result = audit_network(
+        source=payload.get("source"),
+        sink=payload.get("sink"),
+        nodes=payload.get("nodes", []),
+        edges=payload.get("edges", []),
+        required_flow=payload.get("required_flow"),
+    )
+    result["service"] = "flare-audit"
+    result["version"] = __version__
+    return result
+
+
+@app.post("/api/review")
+async def review(request: Request) -> dict:
+    """对一份导排网络草稿发起薄弱管段复核。
+
+    服务端从完整草稿**重新执行**既有审计：任一情形本已不达标时，
+    保留既有首条失败证据且不生成薄弱分级；全部达标时，对每个情形
+    给出最小割容量、相对事故要求的裕量，以及每条管段相对**全部**
+    等容量源侧最小割的归属（全部必经 / 仅部分跨越 / 从不跨割）。
+    输入校验与 ``/api/audit`` 相同，无效时返回 400。
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "请求体必须是合法 JSON", "field": None})
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"error": "请求体必须是 JSON 对象", "field": None})
+
+    result = review_network(
         source=payload.get("source"),
         sink=payload.get("sink"),
         nodes=payload.get("nodes", []),

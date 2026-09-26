@@ -3,10 +3,11 @@
 
 按顺序执行三类交付校验，任一步失败即以非零退出码报告：
 
-  1. 代码测试：pytest 测试套件（最大流/最小割、校验、API）；
+  1. 代码测试：pytest 测试套件（最大流/最小割、校验、审计、薄弱复核、API）；
   2. 构建：字节码编译 + FastAPI 应用导入（确保可启动）；
-  3. 导排 API 冒烟：真实拉起 uvicorn，调用 /health 与 /api/audit，
-     覆盖达标放行、失效证据（首条失效管段 + 最小割）、非法输入 400。
+  3. 导排 API 冒烟：真实拉起 uvicorn，调用 /health、/api/audit 与
+     /api/review，覆盖达标放行、失效证据（首条失效管段 + 最小割）、
+     薄弱复核全最小割分级、不达标草稿不生成分级、非法输入 400。
 """
 from __future__ import annotations
 
@@ -57,6 +58,18 @@ PAYLOAD_INVALID = {
     "edges": [{"id": "X", "from": "S", "to": "幽灵节点", "capacity": 10, "maintainable": True}],
 }
 
+# 唯一瓶颈：A→T（100）被全部最小割跨越；上游宽裕的 S→A（200）从不跨割。
+PAYLOAD_BOTTLENECK = {
+    "source": "S",
+    "sink": "T",
+    "required_flow": 100,
+    "nodes": ["A"],
+    "edges": [
+        {"id": "E1", "from": "S", "to": "A", "capacity": 200, "maintainable": False},
+        {"id": "E2", "from": "A", "to": "T", "capacity": 100, "maintainable": False},
+    ],
+}
+
 
 def _log(ok: bool, title: str, detail: str = "") -> None:
     mark = "PASS" if ok else "FAIL"
@@ -97,7 +110,12 @@ def run_build() -> bool:
         capture_output=True,
         text=True,
     )
-    import_ok = proc.returncode == 0 and "/api/audit" in proc.stdout and "/health" in proc.stdout
+    import_ok = (
+        proc.returncode == 0
+        and "/api/audit" in proc.stdout
+        and "/api/review" in proc.stdout
+        and "/health" in proc.stdout
+    )
     _log(import_ok, "FastAPI 应用导入与路由装配", proc.stderr.strip()[-400:] if not import_ok else "")
     return ok and import_ok
 
@@ -188,6 +206,60 @@ def run_smoke() -> bool:
         invalid_ok = status == 400 and bool(body.get("error"))
         _log(invalid_ok, f"节点引用无效返回 400（实际 HTTP {status}：{body.get('error', '')}）")
         ok &= invalid_ok
+
+        # 薄弱复核（达标草稿）：并联干线没有任何管段被全部最小割跨越；
+        # 失效 E1 后闲置的 E2 与瓶颈无关 —— 区分单次割集偶然管段与必经管段
+        status, body = _request("POST", f"{base}/api/review", PAYLOAD_PASS)
+        scenarios = body.get("scenarios") or []
+        normal = scenarios[0] if scenarios else {}
+        cls_normal = {e.get("id"): e.get("class") for e in normal.get("edges", [])}
+        scen_e1 = next(
+            (s for s in scenarios if (s.get("removed") or {}).get("edge_id") == "E1"), {}
+        )
+        cls_e1 = {e.get("id"): e.get("class") for e in scen_e1.get("edges", [])}
+        review_ok = (
+            status == 200
+            and body.get("reviewable") is True
+            and len(scenarios) == 5  # 正常网络 + 4 条可检修管段
+            and all(abs(s["min_cut_capacity"] - s["max_flow"]) < EPS for s in scenarios)
+            and all(abs(s["margin"] - (s["max_flow"] - 95)) < EPS for s in scenarios)
+            and cls_normal == {"E1": "some", "E2": "some", "E3": "some", "E4": "some"}
+            and cls_e1 == {"E2": "never", "E3": "some", "E4": "some"}
+        )
+        _log(review_ok, "薄弱复核：并联干线无“全部最小割必经”管段，失效 E1 后 E2 与瓶颈无关",
+             "" if review_ok else json.dumps(body, ensure_ascii=False)[:600])
+        ok &= review_ok
+
+        # 薄弱复核（唯一瓶颈）：A→T 被全部最小割跨越，S→A 从不跨割
+        status, body = _request("POST", f"{base}/api/review", PAYLOAD_BOTTLENECK)
+        b_scenarios = body.get("scenarios") or []
+        b_normal = b_scenarios[0] if b_scenarios else {}
+        cls_b = {e.get("id"): e.get("class") for e in b_normal.get("edges", [])}
+        bottleneck_ok = (
+            status == 200
+            and body.get("reviewable") is True
+            and len(b_scenarios) == 1
+            and cls_b == {"E1": "never", "E2": "all"}
+            and b_normal.get("min_cut_capacity") == 100
+            and b_normal.get("margin") == 0
+        )
+        _log(bottleneck_ok, "薄弱复核：唯一瓶颈管段归入“全部最小割必经”，上游宽裕管段“从不跨割”",
+             "" if bottleneck_ok else json.dumps(body, ensure_ascii=False)[:600])
+        ok &= bottleneck_ok
+
+        # 薄弱复核（不达标草稿）：保留首条失败证据，不生成薄弱分级
+        status, body = _request("POST", f"{base}/api/review", PAYLOAD_FAIL)
+        f = body.get("failure") or {}
+        review_fail_ok = (
+            status == 200
+            and body.get("reviewable") is False
+            and body.get("scenarios") is None
+            and f.get("position") == 1
+            and abs((f.get("cut") or {}).get("capacity", -1) - f.get("max_flow", -2)) < EPS
+        )
+        _log(review_fail_ok, "薄弱复核：不达标草稿保留首条失败证据且不生成薄弱分级",
+             "" if review_fail_ok else json.dumps(body, ensure_ascii=False)[:600])
+        ok &= review_fail_ok
     finally:
         server.terminate()
         try:

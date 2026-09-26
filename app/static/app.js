@@ -12,7 +12,9 @@
   const state = {
     nodes: [],          // 汇合节点名称（不含源/汇）
     edges: [],          // {id, from, to, capacity, maintainable}
-    lastAuditSignature: null,  // 上次成功提交时草稿的签名
+    lastAuditSignature: null,   // 上次成功提交审计时草稿的签名
+    lastAuditPassed: false,     // 上次审计是否放行（复核的前置条件）
+    lastReviewSignature: null,  // 上次成功复核时草稿的签名
   };
 
   /* ---------------- 示例数据 ---------------- */
@@ -174,12 +176,19 @@
   }
 
   function markDirty() {
-    if (state.lastAuditSignature === null) return;
-    const stale = signature() !== state.lastAuditSignature;
-    $("stale-banner").classList.toggle("hidden", !stale);
-    $("draft-hint").textContent = stale
-      ? "草稿已修改，结论区显示的是旧结论，请重新提交审计。"
-      : "";
+    const sig = signature();
+    if (state.lastAuditSignature !== null) {
+      const stale = sig !== state.lastAuditSignature;
+      $("stale-banner").classList.toggle("hidden", !stale);
+      $("draft-hint").textContent = stale
+        ? "草稿已修改，结论区显示的是旧结论，请重新提交审计。"
+        : "";
+    }
+    // 草稿任意改动后，旧复核结果立即标为过期，不能作为新草稿的检修依据
+    if (state.lastReviewSignature !== null) {
+      const reviewStale = sig !== state.lastReviewSignature;
+      $("review-stale-banner").classList.toggle("hidden", !reviewStale);
+    }
   }
 
   function clearResult() {
@@ -187,6 +196,9 @@
     $("reject-card").classList.add("hidden");
     $("stale-banner").classList.add("hidden");
     $("draft-hint").textContent = "";
+    $("review-card").classList.add("hidden");
+    $("review-stale-banner").classList.add("hidden");
+    state.lastReviewSignature = null;
   }
 
   /* ---------------- 结论渲染 ---------------- */
@@ -234,6 +246,7 @@
     $("draft-hint").textContent = "";
 
     const passed = !!data.passed;
+    state.lastAuditPassed = passed;
     $("pass-panel").classList.toggle("hidden", !passed);
     $("fail-panel").classList.toggle("hidden", passed);
 
@@ -311,6 +324,7 @@
 
   function renderRejection(err) {
     $("result-card").classList.add("hidden");
+    state.lastAuditPassed = false;
     const card = $("reject-card");
     card.classList.remove("hidden");
     $("reject-msg").textContent = err || "输入无效。";
@@ -346,6 +360,186 @@
     }
   }
 
+  /* ---------------- 薄弱管段复核（真实业务 API） ---------------- */
+
+  const CLASS_LABEL = {
+    all: "全部最小割必经",
+    some: "可替代瓶颈",
+    never: "从不跨割",
+  };
+  const CLASS_TITLE = {
+    all: "该情形下所有容量等于最大可导排量的源侧最小割都跨过这条管段，任何同容量瓶颈都绕不开它",
+    some: "只出现在部分最小割中：单次最大流返回的割集可能偶然包含它，但存在不经过它的同容量瓶颈",
+    never: "该情形下没有任何最小割跨过这条管段，与瓶颈无关",
+  };
+
+  function metricBox(label, value, cls) {
+    const box = document.createElement("div");
+    box.className = "metric";
+    const l = document.createElement("span");
+    l.className = "metric-label";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = "metric-value" + (cls ? " " + cls : "");
+    v.textContent = value;
+    box.append(l, v);
+    return box;
+  }
+
+  function reviewScenarioBlock(sc, idx) {
+    const wrap = document.createElement("div");
+    wrap.className = "review-scenario";
+
+    const h3 = document.createElement("h3");
+    if (sc.stage === "normal") {
+      h3.textContent = `情形 ${idx + 1}：正常网络（无管段失效）`;
+    } else {
+      const r = sc.removed;
+      const id = r.edge_id ? `（${r.edge_id}）` : "";
+      h3.textContent = `情形 ${idx + 1}：第 ${r.position} 条管段${id} 临时失效（${r.from} → ${r.to}）`;
+    }
+    wrap.appendChild(h3);
+
+    const metrics = document.createElement("div");
+    metrics.className = "metric-row";
+    metrics.append(
+      metricBox("最大可导排量", fmt(sc.max_flow)),
+      metricBox("最小割容量", fmt(sc.min_cut_capacity)),
+      metricBox("事故要求", fmt(sc.required_flow)),
+      metricBox("裕量（最大可导排量 − 事故要求）", fmt(sc.margin),
+        sc.margin > 0 ? "meets-yes" : "meets-warn")
+    );
+    wrap.appendChild(metrics);
+
+    const summary = document.createElement("p");
+    summary.className = "tip";
+    summary.textContent =
+      `全部最小割必经 ${sc.class_counts.all} 条 · 可替代瓶颈（仅部分最小割）${sc.class_counts.some} 条 · 与瓶颈无关 ${sc.class_counts.never} 条`;
+    wrap.appendChild(summary);
+
+    // 管段分级表
+    const scroll = document.createElement("div");
+    scroll.className = "table-scroll";
+    const table = document.createElement("table");
+    table.className = "review-table";
+    table.innerHTML =
+      "<thead><tr><th>#</th><th>管段编号</th><th>管段</th><th>容量</th><th>薄弱分级</th></tr></thead>";
+    const body = document.createElement("tbody");
+    sc.edges.forEach((e) => {
+      const tr = document.createElement("tr");
+      if (e.class === "all") tr.className = "row-all";
+      [String(e.position), e.id || "—", `${e.from} → ${e.to}`, fmt(e.capacity)]
+        .forEach((c) => {
+          const td = document.createElement("td");
+          td.textContent = c;
+          tr.appendChild(td);
+        });
+      const tdCls = document.createElement("td");
+      const pill = document.createElement("span");
+      pill.className = "pill " + e.class;
+      pill.textContent = CLASS_LABEL[e.class] || e.class;
+      pill.title = CLASS_TITLE[e.class] || "";
+      tdCls.appendChild(pill);
+      tr.appendChild(tdCls);
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    scroll.appendChild(table);
+    wrap.appendChild(scroll);
+
+    // 可复核证据：全部最小割源侧的交集 / 并集
+    const det = document.createElement("details");
+    det.className = "cut-detail";
+    const sum = document.createElement("summary");
+    sum.textContent = "查看该情形全部最小割的源侧范围（交集 / 并集）";
+    det.appendChild(sum);
+    const grid = document.createElement("div");
+    grid.className = "cut-grid";
+    const d1 = document.createElement("div");
+    const h1 = document.createElement("h3");
+    h1.textContent = "源侧交集（任何最小割都含这些节点）";
+    const c1 = document.createElement("div");
+    c1.className = "chips";
+    renderChips(c1, sc.min_source_side_nodes, "src");
+    d1.append(h1, c1);
+    const d2 = document.createElement("div");
+    const h2 = document.createElement("h3");
+    h2.textContent = "源侧并集（最小割源侧最大到此为止）";
+    const c2 = document.createElement("div");
+    c2.className = "chips";
+    renderChips(c2, sc.max_source_side_nodes, "sink");
+    d2.append(h2, c2);
+    grid.append(d1, d2);
+    det.appendChild(grid);
+    wrap.appendChild(det);
+
+    return wrap;
+  }
+
+  function renderReview(data) {
+    const card = $("review-card");
+    card.classList.remove("hidden");
+    $("review-stale-banner").classList.add("hidden");
+
+    const ok = !!data.reviewable;
+    $("review-ok-panel").classList.toggle("hidden", !ok);
+    $("review-fail-panel").classList.toggle("hidden", ok);
+
+    if (!ok) {
+      // 情形本已不达标：保留既有首条失败证据，不生成薄弱分级
+      const f = data.failure || {};
+      $("review-fail-edge").textContent = f.stage === "normal" ? "（正常网络本身）" : edgeLabel(f);
+      $("review-fail-flow").textContent = fmt(f.max_flow);
+      $("review-fail-required").textContent = fmt(f.required_flow);
+      const cut = f.cut || { source_side_nodes: [], sink_side_nodes: [], cut_edges: [], capacity: null };
+      renderChips($("review-cut-source-side"), cut.source_side_nodes, "src");
+      renderChips($("review-cut-sink-side"), cut.sink_side_nodes, "sink");
+      $("review-cut-edges-body").innerHTML = cutEdgeRows(cut, true);
+      $("review-cut-capacity").textContent = fmt(cut.capacity);
+    } else {
+      const box = $("review-scenarios");
+      box.innerHTML = "";
+      (data.scenarios || []).forEach((sc, i) => box.appendChild(reviewScenarioBlock(sc, i)));
+    }
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function submitReview() {
+    // 复核必须基于“当前草稿刚通过审计”的状态；草稿改动后须先重新审计
+    if (
+      !state.lastAuditPassed ||
+      state.lastAuditSignature === null ||
+      signature() !== state.lastAuditSignature
+    ) {
+      $("review-hint").textContent = "草稿在审计后已被修改，请先重新提交审计并通过，再发起复核。";
+      return;
+    }
+    const payload = currentPayload();
+    $("btn-review").disabled = true;
+    $("review-hint").textContent = "正在调用服务端复核 API…";
+    try {
+      const resp = await fetch("/api/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        renderRejection(data.error || `复核请求失败（HTTP ${resp.status}）`);
+        state.lastReviewSignature = null;
+        return;
+      }
+      state.lastReviewSignature = signature();
+      renderReview(data);
+    } catch (e) {
+      renderRejection("无法连接复核服务：" + e.message);
+      state.lastReviewSignature = null;
+    } finally {
+      $("btn-review").disabled = false;
+      $("review-hint").textContent = "审计已放行；可进一步识别在所有同容量瓶颈中均不可绕开的管段。";
+    }
+  }
+
   /* ---------------- 载入 / 清空 ---------------- */
 
   function loadExample(ex) {
@@ -356,6 +550,7 @@
     state.nodes = ex.nodes.slice();
     state.edges = ex.edges.map((e) => ({ ...e }));
     state.lastAuditSignature = null;
+    state.lastAuditPassed = false;
     renderAll();
   }
 
@@ -367,6 +562,7 @@
     state.nodes = [];
     state.edges = [];
     state.lastAuditSignature = null;
+    state.lastAuditPassed = false;
     renderAll();
   }
 
@@ -387,6 +583,7 @@
   });
 
   $("btn-audit").addEventListener("click", submitAudit);
+  $("btn-review").addEventListener("click", submitReview);
   $("btn-example-pass").addEventListener("click", () => loadExample(EXAMPLE_PASS));
   $("btn-example-fail").addEventListener("click", () => loadExample(EXAMPLE_FAIL));
   $("btn-clear").addEventListener("click", clearAll);
